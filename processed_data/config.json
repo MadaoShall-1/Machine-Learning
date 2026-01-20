@@ -1,0 +1,24 @@
+{
+  "model_name": "xlm-roberta-base",
+  "language_pairs": [
+    "spanish_eng",
+    "arabic_eng",
+    "hindi_eng",
+    "chinese_eng"
+  ],
+  "duration_bins": {
+    "Small": [
+      1,
+      2
+    ],
+    "Medium": [
+      3,
+      6
+    ],
+    "Large": [
+      7,
+      999
+    ]
+  },
+  "max_length": 512
+}

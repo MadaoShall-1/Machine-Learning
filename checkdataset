@@ -1,0 +1,79 @@
+# check_dataset.py
+from huggingface_hub import HfApi
+from datasets import load_dataset
+
+def check_switchlingua():
+    """检查 SwitchLingua 数据集状态"""
+    
+    print("="*60)
+    print("检查 SwitchLingua 数据集")
+    print("="*60)
+    
+    # 1. 检查数据集是否存在
+    api = HfApi()
+    dataset_name = "Shelton1013/SwitchLingua_text"
+    
+    print(f"\n1️⃣ 检查数据集: {dataset_name}")
+    try:
+        info = api.dataset_info(dataset_name)
+        print(f"   ✅ 数据集存在！")
+        print(f"   - 作者: {info.author}")
+        print(f"   - 是否需要门控: {info.gated}")
+        print(f"   - 下载量: {info.downloads}")
+        
+        # 如果是门控数据集
+        if info.gated:
+            print(f"\n   ⚠️ 这是一个需要申请访问的数据集 (Gated Dataset)")
+            print(f"   📝 请访问以下链接申请访问:")
+            print(f"   🔗 https://huggingface.co/datasets/{dataset_name}")
+            
+    except Exception as e:
+        print(f"   ❌ 无法访问数据集")
+        print(f"   错误: {e}")
+        return False
+    
+    # 2. 尝试加载数据集
+    print(f"\n2️⃣ 尝试加载数据集...")
+    try:
+        dataset = load_dataset(dataset_name, split="train[:5]")
+        print(f"   ✅ 成功加载数据集！")
+        print(f"   - 样本数: {len(dataset)}")
+        print(f"   - 字段: {dataset.column_names}")
+        
+        print(f"\n3️⃣ 第一条样本:")
+        sample = dataset[0]
+        for key, value in sample.items():
+            if isinstance(value, str) and len(value) > 100:
+                print(f"   {key}: {value[:100]}...")
+            else:
+                print(f"   {key}: {value}")
+        
+        return True
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"   ❌ 无法加载数据集")
+        print(f"   错误: {error_msg}")
+        
+        # 根据错误类型给出建议
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            print(f"\n   💡 建议:")
+            print(f"   1. 确认已经运行 'huggingface-cli login'")
+            print(f"   2. 检查 token 是否有效")
+            
+        elif "403" in error_msg or "Forbidden" in error_msg or "gated" in error_msg.lower():
+            print(f"\n   💡 建议:")
+            print(f"   1. 访问 https://huggingface.co/datasets/{dataset_name}")
+            print(f"   2. 查找 'Request Access' 或 'Access repository' 按钮")
+            print(f"   3. 同意条款并申请访问")
+            print(f"   4. 等待批准（可能是即时的）")
+            
+        elif "404" in error_msg or "not found" in error_msg.lower():
+            print(f"\n   💡 建议:")
+            print(f"   1. 检查数据集名称是否正确")
+            print(f"   2. 数据集可能已被删除或改名")
+            
+        return False
+
+if __name__ == "__main__":
+    check_switchlingua()

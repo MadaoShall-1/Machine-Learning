@@ -1,0 +1,27 @@
+{
+  "spanish_eng": {
+    "total_sentences": 24517,
+    "total_tokens": 649811,
+    "total_switches": 2
+  },
+  "duration_distribution": {
+    "class_1": 49012,
+    "class_0": 64817,
+    "class_2": 50342
+  },
+  "arabic_eng": {
+    "total_sentences": 26791,
+    "total_tokens": 652049,
+    "total_switches": 40216
+  },
+  "hindi_eng": {
+    "total_sentences": 26683,
+    "total_tokens": 707556,
+    "total_switches": 34999
+  },
+  "chinese_eng": {
+    "total_sentences": 29561,
+    "total_tokens": 795246,
+    "total_switches": 88954
+  }
+}
