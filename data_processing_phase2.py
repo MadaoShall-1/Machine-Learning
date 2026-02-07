@@ -1,16 +1,3 @@
-"""
-Phase 2: Data Engineering for Streaming Code-Switching Prediction
-===================================================================
-Complete pipeline for processing SwitchLingua dataset with:
-1. Sub-word tokenization with Language ID alignment  
-2. Predictive label generation (switch + duration)
-3. Causal streaming dataloader creation
-4. Comprehensive validation
-
-Author: Shuhuan Ye, Zhihang Cheng, Qi Zhou
-Date: January 2026
-"""
-
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -102,7 +89,7 @@ class LanguageDetector:
                 "text-classification",
                 model="papluca/xlm-roberta-base-language-detection",
                 device=device,
-                batch_size=16  # CPU batch size
+                batch_size=8  # CPU batch size
             )
             self.lang_id_available = True
             self.device = device
@@ -147,6 +134,7 @@ class LanguageDetector:
         return script_counts.most_common(1)[0][0]
     
     def detect_sentence_languages(self, full_text: str, pair: str) -> dict:
+
         """
         OPTIMIZED: Detect language pattern using XLM-R Language ID model
         GPU-accelerated with batch processing
