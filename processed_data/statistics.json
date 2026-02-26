@@ -1,13 +1,13 @@
 {
+  "duration_distribution": {
+    "class_0": 158088,
+    "class_2": 57354,
+    "class_1": 74682
+  },
   "spanish_eng": {
     "total_sentences": 24517,
     "total_tokens": 649811,
-    "total_switches": 2
-  },
-  "duration_distribution": {
-    "class_1": 49012,
-    "class_0": 64817,
-    "class_2": 50342
+    "total_switches": 125955
   },
   "arabic_eng": {
     "total_sentences": 26791,

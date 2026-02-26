@@ -8,7 +8,7 @@
   "duration_accuracy": {
     "passed": true,
     "accuracy": 100.0,
-    "total_switches": 164171,
+    "total_switches": 290124,
     "errors": 0
   },
   "switch_duration_logic": {
@@ -25,8 +25,8 @@
     "passed": false,
     "stats": {
       "train": {
-        "switch_rate": 5.861999786004708,
-        "total_switches": 131487,
+        "switch_rate": 10.315910549967901,
+        "total_switches": 231390,
         "pair_counts": {
           "spanish_eng": 19488,
           "chinese_eng": 23590,
@@ -34,14 +34,14 @@
           "arabic_eng": 21504
         },
         "duration_dist": {
-          "2": 40238,
-          "0": 52077,
-          "1": 39172
+          "1": 59573,
+          "0": 125994,
+          "2": 45823
         }
       },
       "val": {
-        "switch_rate": 5.830523378469896,
-        "total_switches": 16444,
+        "switch_rate": 10.37325419365819,
+        "total_switches": 29256,
         "pair_counts": {
           "arabic_eng": 2585,
           "chinese_eng": 3028,
@@ -49,14 +49,14 @@
           "spanish_eng": 2495
         },
         "duration_dist": {
-          "2": 5105,
-          "1": 4942,
-          "0": 6397
+          "2": 5834,
+          "1": 7521,
+          "0": 15901
         }
       },
       "test": {
-        "switch_rate": 5.808526086505549,
-        "total_switches": 16240,
+        "switch_rate": 10.543333249877499,
+        "total_switches": 29478,
         "pair_counts": {
           "chinese_eng": 2943,
           "hindi_eng": 2577,
@@ -64,9 +64,9 @@
           "arabic_eng": 2702
         },
         "duration_dist": {
-          "0": 6343,
-          "2": 4999,
-          "1": 4898
+          "0": 16193,
+          "2": 5697,
+          "1": 7588
         }
       }
     },

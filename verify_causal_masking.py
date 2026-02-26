@@ -24,7 +24,7 @@ from typing import Dict, List, Tuple
 import json
 
 # Import from main module
-from model_architecture_phase2 import (
+from model import (
     CausalCodeSwitchModel,
     ModelConfig,
     create_causal_mask,

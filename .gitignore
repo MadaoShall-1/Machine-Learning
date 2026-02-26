@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Data files
+processed_data/
+*.pkl
+*.zip
+
+# Model outputs
+model_outputs/
+*.pt
+*.pth
+*.ckpt
+
+# Logs & figures
+*.png
+*.jpg
+*.log
+
+# Environment
+.venv/
+.env
+
+verify_causal_masking.py

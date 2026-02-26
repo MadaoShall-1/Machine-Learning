@@ -27,7 +27,7 @@ from collections import defaultdict
 # Import from main module
 import sys
 sys.path.insert(0, '.')
-from model_architecture_phase2 import (
+from model import (
     CausalCodeSwitchModel,
     ModelConfig,
     EnhancedStreamingDataset
