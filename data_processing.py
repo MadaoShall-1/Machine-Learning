@@ -981,9 +981,43 @@ class StreamingCodeSwitchDataset(Dataset):
 
 def main():
     """Run the complete Phase 2 pipeline"""
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Process data for code-switching prediction")
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="xlm-roberta-base",
+        help="Tokenizer/backbone name (e.g. xlm-roberta-base or bert-base-multilingual-cased)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./processed_data",
+        help="Directory to save processed splits",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default="./cache",
+        help="Directory for cached artifacts",
+    )
+    parser.add_argument(
+        "--max_length",
+        type=int,
+        default=512,
+        help="Tokenizer max length metadata to store in config",
+    )
+
+    args = parser.parse_args()
+
     # Initialize configuration
-    config = ProcessingConfig()
+    config = ProcessingConfig(
+        model_name=args.model_name,
+        output_dir=Path(args.output_dir),
+        cache_dir=Path(args.cache_dir),
+        max_length=args.max_length,
+    )
     
     # Create processor
     processor = SwitchLinguaProcessor(config)
