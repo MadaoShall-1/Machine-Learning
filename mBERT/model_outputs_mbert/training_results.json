@@ -1,0 +1,231 @@
+{
+  "training_history": [
+    {
+      "epoch": 1,
+      "train": {
+        "loss": 1.0617922441911698,
+        "switch_loss": 0.6461876377081871,
+        "duration_loss": 0.8312092139494419
+      },
+      "val": {
+        "switch_precision": 0.8888888888790123,
+        "switch_recall": 0.01805869074491692,
+        "switch_f1": 0.035398230084576904,
+        "switch_accuracy": 0.9127127127126944,
+        "duration_acc_class_0": 0.8458149779735683,
+        "duration_acc_class_1": 0.21505376344086022,
+        "duration_acc_class_2": 0.5203252032520326,
+        "duration_accuracy": 0.6230248306996337,
+        "duration_macro_accuracy": 0.5270646482221536,
+        "hindi_eng_f1": 0.21874999997983396,
+        "chinese_eng_f1": 0.012820512817965155,
+        "spanish_eng_f1": 0.0,
+        "arabic_eng_f1": 0.0,
+        "sigma_universality": 0.09301841543578085,
+        "mean_pair_f1": 0.05789262819944978,
+        "loss": 1.3076576224361627
+      }
+    },
+    {
+      "epoch": 2,
+      "train": {
+        "loss": 0.9070425611551106,
+        "switch_loss": 0.5312466108341515,
+        "duration_loss": 0.7515919006725401
+      },
+      "val": {
+        "switch_precision": 0.5660919540228259,
+        "switch_recall": 0.4446952595935791,
+        "switch_f1": 0.4981036661958545,
+        "switch_accuracy": 0.920520520520502,
+        "duration_acc_class_0": 0.6872246696035242,
+        "duration_acc_class_1": 0.46236559139784944,
+        "duration_acc_class_2": 0.4959349593495935,
+        "duration_accuracy": 0.5869074492097998,
+        "duration_macro_accuracy": 0.5485084067836558,
+        "hindi_eng_f1": 0.571428571378738,
+        "chinese_eng_f1": 0.6170212765457322,
+        "spanish_eng_f1": 0.3938461537959688,
+        "arabic_eng_f1": 0.41860465112374257,
+        "sigma_universality": 0.09577272453876227,
+        "mean_pair_f1": 0.5002251632110454,
+        "loss": 0.8724791537583493
+      }
+    },
+    {
+      "epoch": 3,
+      "train": {
+        "loss": 0.7861284122835472,
+        "switch_loss": 0.44128174058962616,
+        "duration_loss": 0.6896933413300477
+      },
+      "val": {
+        "switch_precision": 0.5382716049381387,
+        "switch_recall": 0.492099322798986,
+        "switch_f1": 0.5141509433462057,
+        "switch_accuracy": 0.9175175175174991,
+        "duration_acc_class_0": 0.6696035242290749,
+        "duration_acc_class_1": 0.44086021505376344,
+        "duration_acc_class_2": 0.6178861788617886,
+        "duration_accuracy": 0.6072234762978314,
+        "duration_macro_accuracy": 0.5761166393815423,
+        "hindi_eng_f1": 0.5789473683700369,
+        "chinese_eng_f1": 0.6415094339119103,
+        "spanish_eng_f1": 0.34899328854118283,
+        "arabic_eng_f1": 0.5254237287630279,
+        "sigma_universality": 0.10892283890182235,
+        "mean_pair_f1": 0.5237184548965395,
+        "loss": 0.8387811368133444
+      }
+    },
+    {
+      "epoch": 4,
+      "train": {
+        "loss": 0.6787871989637986,
+        "switch_loss": 0.3642129468974471,
+        "duration_loss": 0.6291485037828982
+      },
+      "val": {
+        "switch_precision": 0.6139705882350684,
+        "switch_recall": 0.37697516930014063,
+        "switch_f1": 0.46713286708559637,
+        "switch_accuracy": 0.9237237237237053,
+        "duration_acc_class_0": 0.7400881057268722,
+        "duration_acc_class_1": 0.2903225806451613,
+        "duration_acc_class_2": 0.6666666666666666,
+        "duration_accuracy": 0.6252821670427483,
+        "duration_macro_accuracy": 0.5656924510129001,
+        "hindi_eng_f1": 0.442307692257304,
+        "chinese_eng_f1": 0.6137931033980453,
+        "spanish_eng_f1": 0.2429906541716307,
+        "arabic_eng_f1": 0.5420560747172679,
+        "sigma_universality": 0.13945542547511536,
+        "mean_pair_f1": 0.460286881136062,
+        "loss": 0.9865849011245901
+      }
+    },
+    {
+      "epoch": 5,
+      "train": {
+        "loss": 0.5855628908900067,
+        "switch_loss": 0.3116019466402463,
+        "duration_loss": 0.5479218882947904
+      },
+      "val": {
+        "switch_precision": 0.5483870967740575,
+        "switch_recall": 0.4988713318283298,
+        "switch_f1": 0.5224586287915959,
+        "switch_accuracy": 0.9191191191191007,
+        "duration_acc_class_0": 0.6740088105726872,
+        "duration_acc_class_1": 0.6129032258064516,
+        "duration_acc_class_2": 0.5284552845528455,
+        "duration_accuracy": 0.620767494356519,
+        "duration_macro_accuracy": 0.6051224403106614,
+        "hindi_eng_f1": 0.5098039215183199,
+        "chinese_eng_f1": 0.5971223021084261,
+        "spanish_eng_f1": 0.45454545449529965,
+        "arabic_eng_f1": 0.561403508721699,
+        "sigma_universality": 0.053830259029845645,
+        "mean_pair_f1": 0.5307187967109361,
+        "loss": 1.1459299568652201
+      }
+    },
+    {
+      "epoch": 6,
+      "train": {
+        "loss": 0.48491704348353026,
+        "switch_loss": 0.2555176836012147,
+        "duration_loss": 0.45879872008513184
+      },
+      "val": {
+        "switch_precision": 0.6253968253966269,
+        "switch_recall": 0.4446952595935791,
+        "switch_f1": 0.5197889181570934,
+        "switch_accuracy": 0.9271271271271085,
+        "duration_acc_class_0": 0.4933920704845815,
+        "duration_acc_class_1": 0.5806451612903226,
+        "duration_acc_class_2": 0.6422764227642277,
+        "duration_accuracy": 0.5530474040630806,
+        "duration_macro_accuracy": 0.572104551513044,
+        "hindi_eng_f1": 0.49999999994998,
+        "chinese_eng_f1": 0.6279863480725694,
+        "spanish_eng_f1": 0.38314176240594233,
+        "arabic_eng_f1": 0.5769230768746302,
+        "sigma_universality": 0.09221613178564532,
+        "mean_pair_f1": 0.5220127968257805,
+        "loss": 1.7132042445593976
+      }
+    },
+    {
+      "epoch": 7,
+      "train": {
+        "loss": 0.3678762547810149,
+        "switch_loss": 0.20765865073421563,
+        "duration_loss": 0.32043520861168895
+      },
+      "val": {
+        "switch_precision": 0.5668604651161143,
+        "switch_recall": 0.44018058690734985,
+        "switch_f1": 0.4955527318439308,
+        "switch_accuracy": 0.920520520520502,
+        "duration_acc_class_0": 0.7048458149779736,
+        "duration_acc_class_1": 0.26881720430107525,
+        "duration_acc_class_2": 0.5772357723577236,
+        "duration_accuracy": 0.5778781038373414,
+        "duration_macro_accuracy": 0.5169662638789242,
+        "hindi_eng_f1": 0.47999999995002,
+        "chinese_eng_f1": 0.5951557092923648,
+        "spanish_eng_f1": 0.37410071937636763,
+        "arabic_eng_f1": 0.5499999999493055,
+        "sigma_universality": 0.08337430606126855,
+        "mean_pair_f1": 0.4998141071420145,
+        "loss": 2.051581169107475
+      }
+    },
+    {
+      "epoch": 8,
+      "train": {
+        "loss": 0.26720224028094497,
+        "switch_loss": 0.15625098324435296,
+        "duration_loss": 0.22190251381776438
+      },
+      "val": {
+        "switch_precision": 0.5847953216372559,
+        "switch_recall": 0.4514672686229229,
+        "switch_f1": 0.5095541400780864,
+        "switch_accuracy": 0.9229229229229045,
+        "duration_acc_class_0": 0.5991189427312775,
+        "duration_acc_class_1": 0.3978494623655914,
+        "duration_acc_class_2": 0.5609756097560976,
+        "duration_accuracy": 0.5462753950337368,
+        "duration_macro_accuracy": 0.5193146716176554,
+        "hindi_eng_f1": 0.47916666661742624,
+        "chinese_eng_f1": 0.6021505375845171,
+        "spanish_eng_f1": 0.40404040399099417,
+        "arabic_eng_f1": 0.5840707964100242,
+        "sigma_universality": 0.0805292293866558,
+        "mean_pair_f1": 0.5173571011507404,
+        "loss": 2.4941438713838626
+      }
+    }
+  ],
+  "best_val_f1": 0.5224586287915959,
+  "test_metrics": {
+    "switch_precision": 0.511111111110985,
+    "switch_recall": 0.4559471365637762,
+    "switch_f1": 0.48195576246460237,
+    "switch_accuracy": 0.9109109109108927,
+    "duration_acc_class_0": 0.6816326530612244,
+    "duration_acc_class_1": 0.33695652173913043,
+    "duration_acc_class_2": 0.5641025641025641,
+    "duration_accuracy": 0.5814977973567002,
+    "duration_macro_accuracy": 0.5275639129676396,
+    "spanish_eng_f1": 0.36474164128755276,
+    "arabic_eng_f1": 0.41860465111228895,
+    "hindi_eng_f1": 0.599999999949,
+    "chinese_eng_f1": 0.5978647686329556,
+    "sigma_universality": 0.10536755109397028,
+    "mean_pair_f1": 0.49530276524544936,
+    "loss": 2.605133135052888
+  }
+}

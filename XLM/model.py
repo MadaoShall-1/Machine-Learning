@@ -442,7 +442,7 @@ class MultitaskCodeSwitchLoss(nn.Module):
     """
     Combined loss function for switch prediction and duration prediction.
     
-    L_total = λ₁ * L_switch + λ₂ * L_duration
+    L_total = Î»â‚ * L_switch + Î»â‚‚ * L_duration
     
     Key features:
     - Switch loss: Standard cross-entropy for binary classification
@@ -517,6 +517,175 @@ class MultitaskCodeSwitchLoss(nn.Module):
             loss_duration = torch.tensor(0.0, device=switch_logits.device)
         
         # Combined loss
+        loss_total = self.lambda_switch * loss_switch + self.lambda_duration * loss_duration
+        
+        return {
+            'loss_total': loss_total,
+            'loss_switch': loss_switch,
+            'loss_duration': loss_duration
+        }
+
+
+# ============================================================================
+# Focal Loss for Class Imbalance
+# ============================================================================
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss (Lin et al., 2017) for handling severe class imbalance.
+    
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    
+    When gamma > 0, the loss down-weights easy examples (large p_t) and 
+    focuses training on hard examples (small p_t). This is especially 
+    effective for code-switching where switch events are only ~2-5% of tokens.
+    
+    Args:
+        alpha: Weighting factor for each class. Can be:
+            - float: applied to positive class, (1-alpha) to negative
+            - Tensor: per-class weights [w_0, w_1, ...]
+            - None: no class weighting
+        gamma: Focusing parameter. gamma=0 recovers standard CE.
+            Recommended: 2.0 for heavy imbalance, 1.0 for moderate.
+        ignore_index: Label value to ignore in loss computation.
+        reduction: 'mean', 'sum', or 'none'
+    """
+    
+    def __init__(
+        self,
+        alpha: Optional[Union[float, torch.Tensor]] = None,
+        gamma: float = 2.0,
+        ignore_index: int = -1,
+        reduction: str = 'mean'
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+        self.reduction = reduction
+        
+        # Handle alpha
+        if isinstance(alpha, (float, int)):
+            # For binary: alpha for class 1, (1-alpha) for class 0
+            self.register_buffer('alpha', torch.tensor([1.0 - alpha, alpha]))
+        elif isinstance(alpha, torch.Tensor):
+            self.register_buffer('alpha', alpha)
+        else:
+            self.alpha = None
+    
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            logits: [N, C] raw logits (before softmax)
+            targets: [N] class indices
+        """
+        # Filter out ignored indices
+        valid_mask = (targets != self.ignore_index)
+        
+        if valid_mask.sum() == 0:
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+        
+        logits = logits[valid_mask]
+        targets = targets[valid_mask]
+        
+        # Compute softmax probabilities
+        p = F.softmax(logits, dim=-1)  # [N, C]
+        
+        # Gather the probability of the correct class: p_t
+        p_t = p.gather(1, targets.unsqueeze(1)).squeeze(1)  # [N]
+        
+        # Compute standard cross-entropy: -log(p_t)
+        ce_loss = -torch.log(p_t.clamp(min=1e-8))  # [N]
+        
+        # Focal modulating factor: (1 - p_t)^gamma
+        focal_weight = (1.0 - p_t) ** self.gamma  # [N]
+        
+        # Apply alpha weighting if provided
+        if self.alpha is not None:
+            alpha_t = self.alpha.to(logits.device).gather(0, targets)  # [N]
+            focal_weight = alpha_t * focal_weight
+        
+        # Final focal loss
+        loss = focal_weight * ce_loss  # [N]
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
+class FocalMultitaskLoss(nn.Module):
+    """
+    Multitask loss using Focal Loss for switch prediction 
+    and standard Cross-Entropy for duration prediction.
+    
+    L_total = λ₁ * FocalLoss_switch + λ₂ * CE_duration
+    
+    Focal Loss is applied to the switch head because that's where the 
+    severe class imbalance exists (~95-98% non-switch vs ~2-5% switch).
+    Duration prediction uses standard CE since it's only evaluated at 
+    switch positions (already filtered, so less imbalanced).
+    """
+    
+    def __init__(
+        self,
+        lambda_switch: float = 1.0,
+        lambda_duration: float = 0.5,
+        focal_alpha: Optional[Union[float, torch.Tensor]] = 0.75,
+        focal_gamma: float = 2.0,
+        duration_class_weights: Optional[torch.Tensor] = None,
+        ignore_index: int = -1
+    ):
+        super().__init__()
+        
+        self.lambda_switch = lambda_switch
+        self.lambda_duration = lambda_duration
+        self.ignore_index = ignore_index
+        
+        # Focal loss for switch prediction (handles class imbalance)
+        self.switch_criterion = FocalLoss(
+            alpha=focal_alpha,
+            gamma=focal_gamma,
+            ignore_index=ignore_index,
+            reduction='mean'
+        )
+        
+        # Standard CE for duration (already filtered to switch positions)
+        self.duration_criterion = nn.CrossEntropyLoss(
+            weight=duration_class_weights,
+            ignore_index=ignore_index,
+            reduction='mean'
+        )
+        
+        logger.info(f"📐 FocalMultitaskLoss initialized:")
+        logger.info(f"   Switch: FocalLoss(alpha={focal_alpha}, gamma={focal_gamma})")
+        logger.info(f"   Duration: CrossEntropyLoss(weighted)")
+        logger.info(f"   Weights: λ_sw={lambda_switch}, λ_dur={lambda_duration}")
+    
+    def forward(
+        self,
+        switch_logits: torch.Tensor,
+        duration_logits: torch.Tensor,
+        switch_labels: torch.Tensor,
+        duration_labels: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """Same interface as MultitaskCodeSwitchLoss for drop-in replacement."""
+        batch_size, seq_len, _ = switch_logits.shape
+        
+        # Flatten
+        switch_logits_flat = switch_logits.view(-1, 2)
+        duration_logits_flat = duration_logits.view(-1, duration_logits.size(-1))
+        switch_labels_flat = switch_labels.view(-1)
+        duration_labels_flat = duration_labels.view(-1)
+        
+        # Compute losses
+        loss_switch = self.switch_criterion(switch_logits_flat, switch_labels_flat)
+        loss_duration = self.duration_criterion(duration_logits_flat, duration_labels_flat)
+        
+        if torch.isnan(loss_duration):
+            loss_duration = torch.tensor(0.0, device=switch_logits.device)
+        
         loss_total = self.lambda_switch * loss_switch + self.lambda_duration * loss_duration
         
         return {
@@ -690,7 +859,7 @@ class CodeSwitchMetrics:
             results[f'{pair}_f1'] = pair_f1
             pair_f1_scores.append(pair_f1)
         
-        # σ_universality: Standard deviation of F1 across pairs
+        # Ïƒ_universality: Standard deviation of F1 across pairs
         # Lower is better (more consistent across languages)
         if len(pair_f1_scores) > 1:
             results['sigma_universality'] = np.std(pair_f1_scores)
@@ -758,12 +927,36 @@ class EnhancedStreamingDataset(Dataset):
                         'sample_idx': sample_idx
                     })
         
-        # 限制样本数量 (随机采样以保持分布)
+        # 限制样本数量 (分层采样，按语言对+switch标签保持比例)
+        # Stratified sampling: preserves distribution across language pairs
+        # AND switch labels (0/1), ensuring minority class is represented
         if max_samples is not None and len(all_points) > max_samples:
             import random
-            random.seed(42)  # 固定种子保证可复现
-            self.prediction_points = random.sample(all_points, max_samples)
-            logger.info(f"⚡ Sampled {max_samples} from {len(all_points)} total points")
+            random.seed(42)
+            
+            # Group by (pair, switch_label) for stratified sampling
+            strata = defaultdict(list)
+            for point in all_points:
+                key = (point['pair'], point['switch_label'])
+                strata[key].append(point)
+            
+            # Calculate proportional allocation per stratum
+            total_points = len(all_points)
+            sampled_points = []
+            
+            for key, points in strata.items():
+                stratum_ratio = len(points) / total_points
+                stratum_n = max(1, int(max_samples * stratum_ratio))
+                if stratum_n >= len(points):
+                    sampled_points.extend(points)
+                else:
+                    sampled_points.extend(random.sample(points, stratum_n))
+            
+            random.shuffle(sampled_points)
+            self.prediction_points = sampled_points
+            
+            logger.info(f"⚡ Stratified sampling: {len(self.prediction_points)} from {total_points} total")
+            logger.info(f"   Strata: {len(strata)} groups (pair × switch_label)")
         else:
             self.prediction_points = all_points
         
@@ -818,7 +1011,7 @@ class EnhancedStreamingDataset(Dataset):
 
 class TrainingProgressCallback:
     """
-    回调函数：追踪和保存训练进度
+    å›žè°ƒå‡½æ•°ï¼šè¿½è¸ªå’Œä¿å­˜è®­ç»ƒè¿›åº¦
     Callback for tracking and saving training progress
     """
     
@@ -827,11 +1020,11 @@ class TrainingProgressCallback:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.log_every_n_steps = log_every_n_steps
         
-        # 进度文件
+        # è¿›åº¦æ–‡ä»¶
         self.progress_file = self.log_dir / "training_progress.json"
         self.step_log_file = self.log_dir / "step_logs.jsonl"
         
-        # 状态追踪
+        # çŠ¶æ€è¿½è¸ª
         self.current_epoch = 0
         self.current_step = 0
         self.total_steps = 0
@@ -839,7 +1032,7 @@ class TrainingProgressCallback:
         self.history = []
         
     def on_train_begin(self, total_epochs: int, steps_per_epoch: int):
-        """训练开始时调用"""
+        """è®­ç»ƒå¼€å§‹æ—¶è°ƒç”¨"""
         self.total_epochs = total_epochs
         self.steps_per_epoch = steps_per_epoch
         self.total_steps = total_epochs * steps_per_epoch
@@ -853,14 +1046,14 @@ class TrainingProgressCallback:
             'progress_pct': 0.0
         })
         
-        logger.info(f"📊 Training progress will be saved to: {self.progress_file}")
+        logger.info(f"ðŸ“Š Training progress will be saved to: {self.progress_file}")
     
     def on_step_end(self, epoch: int, step: int, loss: float, metrics: dict = None):
-        """每个step结束时调用"""
+        """æ¯ä¸ªstepç»“æŸæ—¶è°ƒç”¨"""
         self.current_epoch = epoch
         self.current_step = epoch * self.steps_per_epoch + step
         
-        # 每N步记录一次
+        # æ¯Næ­¥è®°å½•ä¸€æ¬¡
         if step % self.log_every_n_steps == 0:
             progress_pct = (self.current_step / self.total_steps) * 100
             
@@ -874,11 +1067,11 @@ class TrainingProgressCallback:
             if metrics:
                 step_info.update(metrics)
             
-            # 追加到日志文件
+            # è¿½åŠ åˆ°æ—¥å¿—æ–‡ä»¶
             with open(self.step_log_file, 'a') as f:
                 f.write(json.dumps(step_info) + '\n')
             
-            # 更新进度文件
+            # æ›´æ–°è¿›åº¦æ–‡ä»¶
             self._save_progress({
                 'status': 'training',
                 'current_epoch': epoch + 1,
@@ -890,7 +1083,7 @@ class TrainingProgressCallback:
             })
     
     def on_epoch_end(self, epoch: int, train_metrics: dict, val_metrics: dict):
-        """每个epoch结束时调用"""
+        """æ¯ä¸ªepochç»“æŸæ—¶è°ƒç”¨"""
         progress_pct = ((epoch + 1) / self.total_epochs) * 100
         
         epoch_info = {
@@ -901,7 +1094,7 @@ class TrainingProgressCallback:
         }
         self.history.append(epoch_info)
         
-        # 更新进度
+        # æ›´æ–°è¿›åº¦
         self._save_progress({
             'status': 'training',
             'current_epoch': epoch + 1,
@@ -913,7 +1106,7 @@ class TrainingProgressCallback:
         })
     
     def on_train_end(self, final_metrics: dict):
-        """训练结束时调用"""
+        """è®­ç»ƒç»“æŸæ—¶è°ƒç”¨"""
         self._save_progress({
             'status': 'completed',
             'current_epoch': self.total_epochs,
@@ -922,10 +1115,10 @@ class TrainingProgressCallback:
             'final_metrics': final_metrics,
             'history': self.history
         })
-        logger.info(f"✅ Training complete! Final progress saved to {self.progress_file}")
+        logger.info(f"âœ… Training complete! Final progress saved to {self.progress_file}")
     
     def _save_progress(self, data: dict):
-        """保存进度到JSON文件"""
+        """ä¿å­˜è¿›åº¦åˆ°JSONæ–‡ä»¶"""
         import time
         data['last_updated'] = time.strftime('%Y-%m-%d %H:%M:%S')
         with open(self.progress_file, 'w') as f:
@@ -943,8 +1136,8 @@ class CodeSwitchTrainer:
     - Early stopping
     - Checkpoint saving
     - Comprehensive logging
-    - 📊 Progress tracking (check training_progress.json)
-    - 🎯 Custom threshold for evaluation
+    - ðŸ“Š Progress tracking (check training_progress.json)
+    - ðŸŽ¯ Custom threshold for evaluation
     """
     
     def __init__(
@@ -955,11 +1148,14 @@ class CodeSwitchTrainer:
         val_dataset: Dataset,
         test_dataset: Optional[Dataset] = None,
         device: str = 'auto',
-        threshold: float = 0.75
+        threshold: float = 0.5,
+        loss_type: str = 'ce',
+        focal_alpha: float = 0.75,
+        focal_gamma: float = 2.0
     ):
         self.model = model
         self.config = config
-        self.threshold = threshold  # 评估时使用的阈值
+        self.threshold = threshold  # è¯„ä¼°æ—¶ä½¿ç”¨çš„é˜ˆå€¼
         
         # Set device
         if device == 'auto':
@@ -1021,13 +1217,24 @@ class CodeSwitchTrainer:
         logger.info(f"Switch class weights: {switch_weights}")
         logger.info(f"Duration class weights: {duration_weights}")
         
-        # Initialize loss function
-        self.criterion = MultitaskCodeSwitchLoss(
-            lambda_switch=config.lambda_switch,
-            lambda_duration=config.lambda_duration,
-            switch_class_weights=switch_weights.to(self.device) if switch_weights is not None else None,
-            duration_class_weights=duration_weights.to(self.device) if duration_weights is not None else None
-        )
+        # Initialize loss function (focal or standard CE)
+        if loss_type == 'focal':
+            logger.info(f"🔥 Using Focal Loss (alpha={focal_alpha}, gamma={focal_gamma})")
+            self.criterion = FocalMultitaskLoss(
+                lambda_switch=config.lambda_switch,
+                lambda_duration=config.lambda_duration,
+                focal_alpha=focal_alpha,
+                focal_gamma=focal_gamma,
+                duration_class_weights=duration_weights.to(self.device) if duration_weights is not None else None
+            )
+        else:
+            logger.info("📐 Using standard Cross-Entropy Loss")
+            self.criterion = MultitaskCodeSwitchLoss(
+                lambda_switch=config.lambda_switch,
+                lambda_duration=config.lambda_duration,
+                switch_class_weights=switch_weights.to(self.device) if switch_weights is not None else None,
+                duration_class_weights=duration_weights.to(self.device) if duration_weights is not None else None
+            )
         
         # Initialize optimizer
         self.optimizer = AdamW(
@@ -1277,7 +1484,7 @@ class CodeSwitchTrainer:
         logger.info(f"Validation samples: {len(self.val_loader.dataset)}")
         logger.info(f"Batch size: {self.config.batch_size}")
         logger.info(f"Learning rate: {self.config.learning_rate}")
-        logger.info(f"Loss weights: λ_switch={self.config.lambda_switch}, λ_duration={self.config.lambda_duration}")
+        logger.info(f"Loss weights: Î»_switch={self.config.lambda_switch}, Î»_duration={self.config.lambda_duration}")
         logger.info("="*60)
         
         best_model_state = None
@@ -1299,7 +1506,7 @@ class CodeSwitchTrainer:
             logger.info(f"  Val Duration Accuracy: {val_metrics['duration_accuracy']:.4f}")
             
             if 'sigma_universality' in val_metrics:
-                logger.info(f"  σ_universality: {val_metrics['sigma_universality']:.4f}")
+                logger.info(f"  Ïƒ_universality: {val_metrics['sigma_universality']:.4f}")
             
             # Record history
             self.training_history.append({
@@ -1312,7 +1519,7 @@ class CodeSwitchTrainer:
             current_f1 = val_metrics['switch_f1']
             
             if current_f1 > self.best_val_f1 + self.config.min_delta:
-                logger.info(f"  ✓ New best F1: {current_f1:.4f} (prev: {self.best_val_f1:.4f})")
+                logger.info(f"  âœ“ New best F1: {current_f1:.4f} (prev: {self.best_val_f1:.4f})")
                 self.best_val_f1 = current_f1
                 self.patience_counter = 0
                 
@@ -1372,7 +1579,7 @@ class CodeSwitchTrainer:
             if 'sigma_universality' in test_metrics:
                 logger.info(f"\nUniversality Metric:")
                 logger.info(f"  Mean Pair F1: {test_metrics.get('mean_pair_f1', 0):.4f}")
-                logger.info(f"  σ_universality: {test_metrics['sigma_universality']:.4f}")
+                logger.info(f"  Ïƒ_universality: {test_metrics['sigma_universality']:.4f}")
         
         return final_results
 
@@ -1534,7 +1741,7 @@ def main():
                         help='Output directory for checkpoints and results')
     parser.add_argument('--model_name', type=str, default='xlm-roberta-base',
                         help='Pretrained model name (xlm-roberta-base or bert-base-multilingual-cased)')
-    parser.add_argument('--batch_size', type=int, default=64,
+    parser.add_argument('--batch_size', type=int, default=32,
                         help='Training batch size')
     parser.add_argument('--learning_rate', type=float, default=2e-5,
                         help='Learning rate')
@@ -1551,40 +1758,49 @@ def main():
                         help='Device to use (auto/cuda/cpu). Use "cpu" if you have CUDA compatibility issues')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='Maximum training samples (for faster testing). E.g., 50000 or 100000')
-    parser.add_argument('--threshold', type=float, default=0.75,
+    parser.add_argument('--threshold', type=float, default=0.5,
                         help='Classification threshold for switch prediction (default 0.5, recommended 0.75)')
+    parser.add_argument('--loss_type', type=str, default='ce',
+                        choices=['ce', 'focal'],
+                        help='Loss function type: "ce" for Cross-Entropy, "focal" for Focal Loss (recommended for imbalanced data)')
+    parser.add_argument('--focal_alpha', type=float, default=0.75,
+                        help='Focal loss alpha (weight for positive/switch class). Higher = more focus on switches')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='Focal loss gamma (focusing parameter). Higher = more focus on hard examples')
     
     args = parser.parse_args()
     
-    # ========== 启动提示 ==========
+    # ========== å¯åŠ¨æç¤º ==========
     print("\n" + "="*60)
-    print("🚀 CODE-SWITCHING PREDICTION MODEL - PHASE 2")
+    print("ðŸš€ CODE-SWITCHING PREDICTION MODEL - PHASE 2")
     print("="*60)
-    print(f"📁 Data directory: {args.data_dir}")
-    print(f"📁 Output directory: {args.output_dir}")
-    print(f"🤖 Model: {args.model_name}")
-    print(f"📦 Batch size: {args.batch_size}")
-    print(f"🔄 Max epochs: {args.max_epochs}")
-    print(f"🎯 Threshold: {args.threshold}")
+    print(f"ðŸ“ Data directory: {args.data_dir}")
+    print(f"ðŸ“ Output directory: {args.output_dir}")
+    print(f"ðŸ¤– Model: {args.model_name}")
+    print(f"ðŸ“¦ Batch size: {args.batch_size}")
+    print(f"ðŸ”„ Max epochs: {args.max_epochs}")
+    print(f"ðŸŽ¯ Threshold: {args.threshold}")
+    loss_desc = f"Focal(alpha={args.focal_alpha}, gamma={args.focal_gamma})" if args.loss_type == 'focal' else "Cross-Entropy"
+    print(f"   Loss: {loss_desc}")
     print("="*60 + "\n")
     
-    # ========== 检查数据文件 ==========
+    # ========== æ£€æŸ¥æ•°æ®æ–‡ä»¶ ==========
     data_dir = Path(args.data_dir)
     
-    print("📂 Checking data files...")
+    print("ðŸ“‚ Checking data files...")
     required_files = ['train.pkl', 'val.pkl']
     missing_files = []
     
     for f in required_files:
         file_path = data_dir / f
         if file_path.exists():
-            print(f"   ✅ Found: {file_path}")
+            print(f"   âœ… Found: {file_path}")
         else:
-            print(f"   ❌ Missing: {file_path}")
+            print(f"   âŒ Missing: {file_path}")
             missing_files.append(f)
     
     if missing_files:
-        print(f"\n❌ ERROR: Missing required data files!")
+        print(f"\nâŒ ERROR: Missing required data files!")
         print(f"   Please run data_processing_phase2.py first:")
         print(f"   >>> python data_processing_phase2.py")
         return None
@@ -1604,28 +1820,28 @@ def main():
         checkpoint_dir=Path(args.output_dir) / 'checkpoints'
     )
     
-    # ========== 设置设备 ==========
+    # ========== è®¾ç½®è®¾å¤‡ ==========
     if args.device == 'cpu':
-        print("⚠️  Forcing CPU mode (CUDA disabled)")
+        print("âš ï¸  Forcing CPU mode (CUDA disabled)")
         import os
         os.environ['CUDA_VISIBLE_DEVICES'] = ''
         device = torch.device('cpu')
     elif args.device == 'cuda':
         if not torch.cuda.is_available():
-            print("❌ CUDA requested but not available, falling back to CPU")
+            print("âŒ CUDA requested but not available, falling back to CPU")
             device = torch.device('cpu')
         else:
             device = torch.device('cuda')
     else:  # auto
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    print(f"🖥️  Using device: {device}")
+    print(f"ðŸ–¥ï¸  Using device: {device}")
     
     # Load datasets
-    print("\n📥 Loading datasets (this may take a moment)...")
+    print("\nðŸ“¥ Loading datasets (this may take a moment)...")
     
     if args.max_samples:
-        print(f"⚡ Limiting to {args.max_samples} training samples for faster training")
+        print(f"âš¡ Limiting to {args.max_samples} training samples for faster training")
     
     train_dataset = EnhancedStreamingDataset(
         data_dir / 'train.pkl',
@@ -1651,7 +1867,7 @@ def main():
         )
     
     # Create model (on CPU first, then move to device)
-    print("\n🤖 Loading pretrained model (downloading if needed, ~1GB)...")
+    print("\nðŸ¤– Loading pretrained model (downloading if needed, ~1GB)...")
     print("   This may take several minutes on first run...")
     model = CausalCodeSwitchModel(config)
     
@@ -1662,8 +1878,11 @@ def main():
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         test_dataset=test_dataset,
-        device=str(device),  # Pass as string
-        threshold=args.threshold  # 使用自定义阈值
+        device=str(device),
+        threshold=args.threshold,
+        loss_type=args.loss_type,
+        focal_alpha=args.focal_alpha,
+        focal_gamma=args.focal_gamma
     )
     
     # Train
