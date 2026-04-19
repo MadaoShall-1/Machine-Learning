@@ -2,13 +2,13 @@
 Phase 2: Model Architecture for Streaming Code-Switching Prediction
 =====================================================================
 Implements:
-1. CausalCodeSwitchModel - Dual-head transformer with causal attention
+1. CausalCodeSwitchModel - Dual-head transformer over prefix-only contexts
 2. Multitask loss function with weighted switch + duration losses
 3. Training loop with validation and early stopping
 4. Comprehensive evaluation metrics including universality analysis
 
 Architecture:
-    [Input Tokens] -> [Multilingual Encoder (XLM-R/mBERT)] -> [Causal Mask]
+    [Input Tokens] -> [Multilingual Encoder (XLM-R/mBERT)] -> [Prefix Window]
                                     |
                     +---------------+---------------+
                     |                               |
@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 import json
 import pickle
@@ -79,6 +79,7 @@ class ModelConfig:
     # Causal attention
     max_context_window: int = 128
     use_causal_mask: bool = True
+    pad_token_id: int = 1
     
     # Multitask loss weights
     lambda_switch: float = 1.0
@@ -110,6 +111,14 @@ class ModelConfig:
             self.hidden_size = 1024
         elif "base" in self.model_name.lower():
             self.hidden_size = 768
+
+    @classmethod
+    def from_dict(cls, payload: Dict) -> 'ModelConfig':
+        data = dict(payload)
+        for key in ('output_dir', 'checkpoint_dir'):
+            if key in data and data[key] is not None:
+                data[key] = Path(data[key])
+        return cls(**data)
 
 
 # ============================================================================
@@ -270,7 +279,7 @@ class DurationPredictionHead(nn.Module):
 
 class CausalCodeSwitchModel(nn.Module):
     """
-    Causal Transformer Model for Streaming Code-Switching Prediction.
+    Prefix-only Transformer Model for Streaming Code-Switching Prediction.
     
     Architecture:
         1. Multilingual encoder backbone (XLM-R or mBERT)
@@ -717,6 +726,26 @@ class CodeSwitchMetrics:
 
 
 # ============================================================================
+# Dataset Helpers
+# ============================================================================
+
+def load_processed_config(data_path: Union[str, Path]) -> Dict:
+    """Load optional processed-data config saved alongside the split file."""
+    data_path = Path(data_path)
+    config_path = data_path.parent / 'config.json'
+    if config_path.exists():
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+
+def last_active_index(attention_mask: torch.Tensor) -> torch.Tensor:
+    """Return the last non-padding position for each sequence in a batch."""
+    lengths = attention_mask.sum(dim=1) - 1
+    return lengths.clamp(min=0).long()
+
+
+# ============================================================================
 # Enhanced Dataset with Language Pair Tracking
 # ============================================================================
 
@@ -730,13 +759,16 @@ class EnhancedStreamingDataset(Dataset):
         data_path: Union[str, Path],
         max_context_window: int = 128,
         include_pair_info: bool = True,
-        max_samples: Optional[int] = None
+        max_samples: Optional[int] = None,
+        pad_token_id: Optional[int] = None
     ):
         with open(data_path, 'rb') as f:
             self.samples = pickle.load(f)
         
         self.max_context_window = max_context_window
         self.include_pair_info = include_pair_info
+        processed_config = load_processed_config(data_path)
+        self.pad_token_id = pad_token_id if pad_token_id is not None else processed_config.get('pad_token_id', 1)
         
         # Flatten samples into individual prediction points
         all_points = []
@@ -793,11 +825,11 @@ class EnhancedStreamingDataset(Dataset):
         
         # Pad if necessary (left padding)
         if len(context_ids) < self.max_context_window:
-            padding = [0] * (self.max_context_window - len(context_ids))
+            padding = [self.pad_token_id] * (self.max_context_window - len(context_ids))
             context_ids = padding + context_ids
         
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = [1 if tid != 0 else 0 for tid in context_ids]
+        attention_mask = [1 if tid != self.pad_token_id else 0 for tid in context_ids]
         
         result = {
             'input_ids': torch.tensor(context_ids, dtype=torch.long),
@@ -966,6 +998,7 @@ class CodeSwitchTrainer:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
+        self.threshold = threshold
         
         logger.info(f"Training on device: {self.device}")
         logger.info(f"Evaluation threshold: {self.threshold}")
@@ -1116,7 +1149,8 @@ class CodeSwitchTrainer:
             desc=f"Epoch {epoch+1}/{self.config.max_epochs}",
             leave=True
         )
-        
+        self.optimizer.zero_grad()
+
         for batch_idx, batch in enumerate(progress_bar):
             # Move to device
             input_ids = batch['input_ids'].to(self.device)
@@ -1159,14 +1193,13 @@ class CodeSwitchTrainer:
             loss.backward()
             
             # Gradient accumulation
-            if (batch_idx + 1) % self.config.gradient_accumulation_steps == 0:
-                # Gradient clipping
+            should_step = (batch_idx + 1) % self.config.gradient_accumulation_steps == 0
+            is_last_batch = (batch_idx + 1) == len(self.train_loader)
+            if should_step or is_last_batch:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     self.config.max_grad_norm
                 )
-                
-                # Optimizer step
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
@@ -1215,9 +1248,11 @@ class CodeSwitchTrainer:
                 apply_causal_mask=True
             )
             
-            # Get last position predictions
-            switch_logits = outputs['switch_logits'][:, -1, :]
-            duration_logits = outputs['duration_logits'][:, -1, :]
+            # Score the last real token in each prefix window
+            last_positions = last_active_index(attention_mask)
+            batch_indices = torch.arange(input_ids.size(0), device=self.device)
+            switch_logits = outputs['switch_logits'][batch_indices, last_positions, :]
+            duration_logits = outputs['duration_logits'][batch_indices, last_positions, :]
             
             # Compute loss
             switch_logits_loss = switch_logits.unsqueeze(1)
@@ -1323,7 +1358,7 @@ class CodeSwitchTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'val_metrics': val_metrics,
-                    'config': self.config
+                    'config': asdict(self.config)
                 }
                 
                 checkpoint_path = self.config.checkpoint_dir / 'best_model.pt'
@@ -1395,12 +1430,14 @@ class StreamingPredictor:
         model: CausalCodeSwitchModel,
         tokenizer,
         max_context_window: int = 128,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        threshold: float = 0.5
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.max_context_window = max_context_window
         self.device = torch.device(device)
+        self.threshold = threshold
         
         self.model.to(self.device)
         self.model.eval()
@@ -1449,9 +1486,11 @@ class StreamingPredictor:
             apply_causal_mask=True
         )
         
-        # Get predictions for last position
-        switch_logits = outputs['switch_logits'][0, -1, :]  # [2]
-        duration_logits = outputs['duration_logits'][0, -1, :]  # [3]
+        # Score the last real token, not the trailing special token
+        last_position = int(attention_mask[0].sum().item()) - 2
+        last_position = max(last_position, 0)
+        switch_logits = outputs['switch_logits'][0, last_position, :]  # [2]
+        duration_logits = outputs['duration_logits'][0, last_position, :]  # [3]
         
         # Convert to probabilities
         switch_probs = F.softmax(switch_logits, dim=0)
@@ -1459,7 +1498,7 @@ class StreamingPredictor:
         
         # Get predictions
         switch_prob = switch_probs[1].item()  # P(switch)
-        predicted_switch = switch_prob > 0.5
+        predicted_switch = switch_prob >= self.threshold
         duration_class = torch.argmax(duration_probs).item()
         
         return {
@@ -1592,6 +1631,7 @@ def main():
     print()
     
     # Create config
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     config = ModelConfig(
         model_name=args.model_name,
         batch_size=args.batch_size,
@@ -1600,6 +1640,7 @@ def main():
         lambda_switch=args.lambda_switch,
         lambda_duration=args.lambda_duration,
         max_context_window=args.context_window,
+        pad_token_id=tokenizer.pad_token_id,
         output_dir=Path(args.output_dir),
         checkpoint_dir=Path(args.output_dir) / 'checkpoints'
     )
@@ -1630,7 +1671,8 @@ def main():
     train_dataset = EnhancedStreamingDataset(
         data_dir / 'train.pkl',
         max_context_window=config.max_context_window,
-        max_samples=args.max_samples
+        max_samples=args.max_samples,
+        pad_token_id=config.pad_token_id
     )
     
     # Validation/test sets: use 10% of max_samples
@@ -1639,7 +1681,8 @@ def main():
     val_dataset = EnhancedStreamingDataset(
         data_dir / 'val.pkl',
         max_context_window=config.max_context_window,
-        max_samples=val_max
+        max_samples=val_max,
+        pad_token_id=config.pad_token_id
     )
     
     test_dataset = None
@@ -1647,7 +1690,8 @@ def main():
         test_dataset = EnhancedStreamingDataset(
             data_dir / 'test.pkl',
             max_context_window=config.max_context_window,
-            max_samples=val_max
+            max_samples=val_max,
+            pad_token_id=config.pad_token_id
         )
     
     # Create model (on CPU first, then move to device)

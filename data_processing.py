@@ -1,14 +1,21 @@
 import pandas as pd
 import numpy as np
+import os
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from collections import Counter, defaultdict
 import json
 import pickle
+import sys
 from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from transformers import AutoTokenizer
 import torch
@@ -38,6 +45,7 @@ class ProcessingConfig:
     # Model configuration
     model_name: str = "xlm-roberta-base"  # Can use "bert-base-multilingual-cased"
     max_length: int = 512
+    spanish_lid_backend: str = "codeswitch"
     
     # Duration binning thresholds (in tokens)
     duration_bins: Dict[str, Tuple[int, int]] = field(default_factory=lambda: {
@@ -64,62 +72,78 @@ class ProcessingConfig:
 
 class LanguageDetector:
     """Detect language at character/token level for code-switching"""
-    
-    def __init__(self):
-        # Unicode ranges for different scripts (for fast non-Latin detection)
+
+    def __init__(
+        self,
+        spanish_lid_backend: str = "codeswitch",
+        cache_dir: Optional[Union[str, Path]] = None,
+    ):
+        self.spanish_lid_backend = spanish_lid_backend
+        self.model_cache_dir = Path(cache_dir) if cache_dir is not None else Path.cwd() / "cache" / "hf_models"
+        self.model_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["HF_HOME"] = str(self.model_cache_dir)
+        os.environ["HUGGINGFACE_HUB_CACHE"] = str(self.model_cache_dir / "hub")
+        os.environ["TRANSFORMERS_CACHE"] = str(self.model_cache_dir / "transformers")
         self.script_ranges = {
             'arabic': [(0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF)],
-            'devanagari': [(0x0900, 0x097F)],  # Hindi
-            'chinese': [(0x4E00, 0x9FFF), (0x3400, 0x4DBF)],  # Han characters
+            'devanagari': [(0x0900, 0x097F)],
+            'chinese': [(0x4E00, 0x9FFF), (0x3400, 0x4DBF)],
             'latin': [(0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x00FF)]
         }
-        
-        # Try to load language identification model
+
+        self.lang_id_map = {
+            'es': 'es',
+            'spa': 'es',
+            'en': 'en',
+            'eng': 'en',
+            'ar': 'ar',
+            'hi': 'hi',
+            'zh': 'zh',
+        }
+
         try:
-            from transformers import pipeline
-            import torch
-            
-            # Force CPU for compatibility with new GPUs (RTX 50 series)
-            # CUDA kernel issues with newer architectures
-            device = -1  # Always use CPU for language detection
-            print(f"   💻 Using CPU for language detection (for compatibility)")
-            
-            print("   🔄 Loading language identification model...")
-            self.lang_id_model = pipeline(
-                "text-classification",
-                model="papluca/xlm-roberta-base-language-detection",
-                device=device,
-                batch_size=8  # CPU batch size
-            )
+            from transformers import pipeline, AutoModelForTokenClassification
+
+            device = -1
+            print(f"   Using CPU for language detection backend: {self.spanish_lid_backend}")
+
+            if self.spanish_lid_backend == 'codeswitch':
+                self.codeswitch_tokenizer = AutoTokenizer.from_pretrained(
+                    'sagorsarker/codeswitch-spaeng-lid-lince',
+                    cache_dir=str(self.model_cache_dir),
+                )
+                self.codeswitch_model = AutoModelForTokenClassification.from_pretrained(
+                    'sagorsarker/codeswitch-spaeng-lid-lince',
+                    cache_dir=str(self.model_cache_dir),
+                )
+                self.codeswitch_model.eval()
+                self.lang_id_model = None
+            else:
+                self.lang_id_model = pipeline(
+                    'text-classification',
+                    model='papluca/xlm-roberta-base-language-detection',
+                    device=device,
+                    batch_size=8,
+                    model_kwargs={"cache_dir": str(self.model_cache_dir)},
+                )
+
             self.lang_id_available = True
             self.device = device
-            
-            # Language code mapping
-            self.lang_id_map = {
-                'es': 'es',  # Spanish
-                'en': 'en',  # English
-                'ar': 'ar',  # Arabic
-                'hi': 'hi',  # Hindi
-                'zh': 'zh',  # Chinese
-            }
-            
-            print(f"   ✅ Language ID model loaded (device: {'GPU' if device == 0 else 'CPU'})")
-            print(f"   ⚡ Batch size: {32 if device == 0 else 8}")
-            
+            print('   Language ID model loaded successfully')
         except Exception as e:
             self.lang_id_available = False
             self.device = -1
-            print(f"   ⚠️  Could not load language ID model: {e}")
-            print("   💡 Will use script-based detection")
-        
-        # Cache for model predictions (huge speedup!)
+            print(f"   Warning: Could not load language ID model: {e}")
+            print('   Will use script-based detection')
+
         self.prediction_cache = {}
-    
+        self.fallback_stats = Counter()
+
     def detect_script(self, text: str) -> str:
         """Detect dominant script in text (fast)"""
         if not text or not text.strip():
             return 'unknown'
-        
+
         script_counts = Counter()
         for char in text:
             code_point = ord(char)
@@ -127,154 +151,151 @@ class LanguageDetector:
                 if any(start <= code_point <= end for start, end in ranges):
                     script_counts[script] += 1
                     break
-        
+
         if not script_counts:
             return 'latin'
-        
-        return script_counts.most_common(1)[0][0]
-    
-    def detect_sentence_languages(self, full_text: str, pair: str) -> dict:
 
-        """
-        OPTIMIZED: Detect language pattern using XLM-R Language ID model
-        GPU-accelerated with batch processing
-        
-        Returns mapping of words to languages
-        """
-        # Only use model for Spanish-English (Latin script pairs)
+        return script_counts.most_common(1)[0][0]
+
+    def detect_sentence_languages(self, full_text: str, pair: str) -> dict:
+        """Detect a word-level language sequence for Spanish-English sentences."""
         if pair != 'spanish_eng' or not self.lang_id_available:
             return None
-        
-        # Check cache first (huge speedup for repeated sentences)
-        if full_text in self.prediction_cache:
-            return self.prediction_cache[full_text]
-        
+
+        cache_key = (self.spanish_lid_backend, full_text)
+        if cache_key in self.prediction_cache:
+            return self.prediction_cache[cache_key]
+
         try:
-            words = full_text.split()
-            if len(words) == 0:
-                return None
-            
-            # Strategy: Process in optimized chunks
-            # GPU: larger chunks for throughput
-            # CPU: smaller chunks for memory
-            chunk_size = 6 if self.device == 0 else 4
-            
-            chunks = []
-            chunk_info = []
-            
-            for i in range(0, len(words), chunk_size):
-                chunk_words = words[i:i+chunk_size]
-                chunk_text = ' '.join(chunk_words)
-                
-                # Skip very short chunks
-                if len(chunk_text.strip()) >= 3:
-                    chunks.append(chunk_text)
-                    chunk_info.append((i, len(chunk_words)))
-            
-            if len(chunks) == 0:
-                return None
-            
-            # Batch prediction (GPU-accelerated!)
-            # This is MUCH faster than one-by-one
-            predictions = self.lang_id_model(chunks)
-            
-            # Map predictions back to words
-            word_langs = ['en'] * len(words)  # Default
-            
-            for (start_idx, chunk_len), pred in zip(chunk_info, predictions):
-                if isinstance(pred, list):
-                    pred = pred[0]  # Get top prediction
-                
-                detected_code = pred.get('label', 'en')
-                mapped_lang = self.lang_id_map.get(detected_code, 'en')
-                
-                # Assign language to all words in this chunk
-                for j in range(chunk_len):
-                    if start_idx + j < len(words):
-                        word_langs[start_idx + j] = mapped_lang
-            
-            result = {'words': words, 'langs': word_langs}
-            self.prediction_cache[full_text] = result
+            if self.spanish_lid_backend == 'codeswitch':
+                result = self._detect_sentence_languages_codeswitch(full_text)
+            else:
+                result = self._detect_sentence_languages_papluca(full_text)
+            self.prediction_cache[cache_key] = result
             return result
-            
         except Exception as e:
-            # Log the error instead of silently returning None
-            print(f"\n   ⚠️  Language detection error: {e}")
+            print(f"\n   Warning: Language detection error: {e}")
             import traceback
             traceback.print_exc()
             return None
-    
+
+    def _detect_sentence_languages_papluca(self, full_text: str) -> Optional[dict]:
+        words = full_text.split()
+        if len(words) == 0:
+            return None
+
+        window_radius = 2
+        contexts = []
+        for idx in range(len(words)):
+            start_idx = max(0, idx - window_radius)
+            end_idx = min(len(words), idx + window_radius + 1)
+            contexts.append(' '.join(words[start_idx:end_idx]))
+
+        predictions = self.lang_id_model(contexts)
+        word_langs = []
+        for pred in predictions:
+            if isinstance(pred, list):
+                pred = pred[0]
+            detected_code = str(pred.get('label', 'en')).lower()
+            word_langs.append(self.lang_id_map.get(detected_code, 'en'))
+
+        return {'words': words, 'langs': word_langs}
+
+    def _detect_sentence_languages_codeswitch(self, full_text: str) -> Optional[dict]:
+        words = full_text.split()
+        if len(words) == 0:
+            return None
+
+        encoding = self.codeswitch_tokenizer(
+            words,
+            is_split_into_words=True,
+            return_tensors='pt',
+            truncation=True,
+        )
+
+        with torch.no_grad():
+            outputs = self.codeswitch_model(**encoding)
+            pred_ids = outputs.logits.argmax(dim=-1)[0].tolist()
+
+        word_ids = encoding.word_ids(batch_index=0)
+        vote_map = defaultdict(list)
+        for pred_id, word_id in zip(pred_ids, word_ids):
+            if word_id is None:
+                continue
+            label = str(self.codeswitch_model.config.id2label[pred_id]).lower()
+            vote_map[word_id].append(self.lang_id_map.get(label, 'en'))
+
+        word_langs = []
+        for word_idx in range(len(words)):
+            votes = vote_map.get(word_idx, ['en'])
+            word_langs.append(Counter(votes).most_common(1)[0][0])
+
+        return {'words': words, 'langs': word_langs}
+
     def get_language_from_script(self, script: str, pair: str) -> str:
         """Map script to language (fallback for non-Latin pairs)"""
         script_to_lang = {
             'arabic': 'ar',
             'devanagari': 'hi',
             'chinese': 'zh',
-            'latin': 'en'  # Default for Latin
+            'latin': 'en'
         }
         return script_to_lang.get(script, 'en')
-    
-    def detect_token_language(self, token_text: str, full_sentence: str, 
-                             token_idx: int, pair: str, 
+
+    def detect_token_language(self, token_text: str, full_sentence: str,
+                             token_idx: int, pair: str,
                              sentence_pattern: dict = None) -> str:
-        """
-        OPTIMIZED: Detect language of a token
-        Uses pre-computed sentence pattern when available
-        """
-        # Fast path: non-Latin scripts
+        """Fallback token-level language detection when word-level mapping is unavailable."""
         script = self.detect_script(token_text)
         if script != 'latin':
             return self.get_language_from_script(script, pair)
-        
-        # For Spanish-English, use model-based detection
+
         if pair == 'spanish_eng' and sentence_pattern is not None:
             words = sentence_pattern['words']
             langs = sentence_pattern['langs']
-            
-            # Clean token text (remove XLM-R prefix and punctuation)
-            token_clean = token_text.lower().strip('▁.,!?;:\'"')
-            
-            # Strategy 1: Exact substring match
+            token_clean = token_text.lower().lstrip("\u2581").strip(" ,!?;:'\"")
+            if not token_clean:
+                self.fallback_stats['empty_token_clean'] += 1
+                return 'en'
+
             for i, word in enumerate(words):
                 word_lower = word.lower()
                 if token_clean in word_lower or word_lower in token_clean:
+                    self.fallback_stats['substring_match'] += 1
                     return langs[i] if i < len(langs) else 'en'
-            
-            # Strategy 2: If token is very short (subword piece), use surrounding context
-            # Check what language dominates the sentence
+
             if len(token_clean) <= 2:
-                from collections import Counter
                 lang_dist = Counter(langs)
-                # Return the majority language
                 if lang_dist:
+                    self.fallback_stats['short_token_majority'] += 1
                     return lang_dist.most_common(1)[0][0]
-            
-            # Strategy 3: Use simple heuristics for common Spanish/English tokens
+
             spanish_tokens = {
                 'el', 'la', 'los', 'las', 'un', 'una', 'de', 'del', 'al',
-                'es', 'son', 'fue', 'hace', 'años', 'este', 'esta',
-                'hueso', 'fósiles', 'ciudad', 'proyecto', 'descubierto'
+                'es', 'son', 'fue', 'hace', 'anos', 'este', 'esta',
+                'hueso', 'fosiles', 'ciudad', 'proyecto', 'descubierto'
             }
             english_tokens = {
                 'the', 'is', 'are', 'it', 'its', "it's", 'this', 'that',
                 'and', 'or', 'to', 'of', 'in', 'on', 'how', 'can',
                 'fascinating', 'ancient', 'creatures', 'earth'
             }
-            
+
             if token_clean in spanish_tokens:
+                self.fallback_stats['heuristic_spanish'] += 1
                 return 'es'
             elif token_clean in english_tokens:
+                self.fallback_stats['heuristic_english'] += 1
                 return 'en'
-            
-            # Strategy 4: Default to majority language in sentence
-            from collections import Counter
+
             lang_dist = Counter(langs)
             if lang_dist:
+                self.fallback_stats['majority_fallback'] += 1
                 return lang_dist.most_common(1)[0][0]
-            
-            return 'en'  # Final fallback
-        
-        # Fallback for other pairs
+
+            self.fallback_stats['final_default_en'] += 1
+            return 'en'
+
         return self.get_language_from_script(script, pair)
 
 
@@ -288,19 +309,44 @@ class SwitchLinguaProcessor:
     def __init__(self, config: ProcessingConfig):
         self.config = config
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-        self.lang_detector = LanguageDetector()
+        self.lang_detector = LanguageDetector(
+            config.spanish_lid_backend,
+            cache_dir=config.cache_dir / "hf_models" / config.spanish_lid_backend,
+        )
         self.stats = defaultdict(lambda: defaultdict(int))
         
         print(f"✅ Initialized with tokenizer: {config.model_name}")
         print(f"   Vocab size: {len(self.tokenizer)}")
     
+    def _resolve_local_csv(self, language_pair: str) -> Optional[Path]:
+        """Resolve local CSV regardless of filename capitalization."""
+        data_dir = Path("data")
+        candidates = [
+            data_dir / f"{language_pair}.csv",
+            data_dir / f"{language_pair.capitalize()}.csv",
+        ]
+        if "_" in language_pair:
+            first, second = language_pair.split("_", 1)
+            candidates.append(data_dir / f"{first.capitalize()}_{second}.csv")
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        normalized_target = f"{language_pair}.csv".lower()
+        for csv_path in data_dir.glob("*.csv"):
+            if csv_path.name.lower() == normalized_target:
+                return csv_path
+
+        return None
+
     def load_raw_data(self, language_pair: str) -> pd.DataFrame:
         """Load data for a specific language pair from local CSV or Hugging Face"""
         print(f"\n📥 Loading {language_pair}...")
         
         # Try local CSV first
-        local_csv_path = Path(f"data/{language_pair}.csv")
-        if local_csv_path.exists():
+        local_csv_path = self._resolve_local_csv(language_pair)
+        if local_csv_path is not None:
             try:
                 df = pd.read_csv(local_csv_path)
                 print(f"   ✅ Loaded from local CSV: {len(df)} samples")
@@ -404,65 +450,56 @@ class SwitchLinguaProcessor:
 
     def tokenize_with_language_ids(self, sentence_meta: Dict) -> Dict:
         """
-        Tokenize text and assign language ID to each token
-        
-        OPTIMIZED: Pre-detect language pattern for entire sentence (fast!)
-        
-        Args:
-            sentence_meta: Dict with keys 'text', 'inferred_pair', 'first_language', 'second_language'
-        
-        Returns: {
-            'tokens': List[str],
-            'token_ids': List[int],
-            'language_ids': List[str],  # ['en', 'ar', 'en', ...]
-            'word_boundaries': List[bool]  # True if token starts a new word
-        }
+        Tokenize text and assign language ID to each token.
+
+        For Spanish-English, we first infer word-level language labels and then
+        project them back to subword tokens using tokenizer word ids. This avoids
+        substring heuristics and aligns training labels with word boundaries.
         """
         text = sentence_meta['text']
         pair = sentence_meta['inferred_pair']
-        
-        # OPTIMIZATION: Pre-compute language pattern for entire sentence
-        # This is MUCH faster than token-by-token detection!
+
         sentence_pattern = self.lang_detector.detect_sentence_languages(text, pair)
-        
-        # Tokenize with special tokens
-        encoding = self.tokenizer(
-            text,
-            add_special_tokens=True,
-            return_offsets_mapping=True,
-            return_special_tokens_mask=True
-        )
-        
+        words = text.split()
+        tokenize_input = words if pair == 'spanish_eng' and words else text
+        tokenize_kwargs = {
+            'add_special_tokens': True,
+            'return_offsets_mapping': True,
+            'return_special_tokens_mask': True,
+        }
+        if pair == 'spanish_eng' and words:
+            tokenize_kwargs['is_split_into_words'] = True
+
+        encoding = self.tokenizer(tokenize_input, **tokenize_kwargs)
+
         tokens = self.tokenizer.convert_ids_to_tokens(encoding['input_ids'])
         token_ids = encoding['input_ids']
         offsets = encoding['offset_mapping']
         special_tokens_mask = encoding['special_tokens_mask']
-        
-        # Assign language ID to each token based on its character content
+        word_ids = encoding.word_ids() if hasattr(encoding, 'word_ids') else [None] * len(token_ids)
+
         language_ids = []
         word_boundaries = []
-        
-        for i, (token, (start, end), is_special) in enumerate(
-            zip(tokens, offsets, special_tokens_mask)
-        ):
+
+        for i, (token, (start_offset, end_offset), is_special) in enumerate(zip(tokens, offsets, special_tokens_mask)):
             if is_special:
                 language_ids.append('special')
                 word_boundaries.append(False)
+                continue
+
+            word_id = word_ids[i]
+            if pair == 'spanish_eng' and sentence_pattern is not None and word_id is not None:
+                lang = sentence_pattern['langs'][word_id]
+                prev_word_id = word_ids[i - 1] if i > 0 else None
+                is_word_start = word_id != prev_word_id
             else:
-                # Get original text span
-                token_text = text[start:end]
-                
-                # Use optimized language detection with pre-computed pattern
-                lang = self.lang_detector.detect_token_language(
-                    token_text, text, i, pair, sentence_pattern
-                )
-                language_ids.append(lang)
-                
-                # Detect word boundaries (tokens not starting with special prefix)
-                # For XLM-R, check if token starts with '▁' (U+2581)
-                is_word_start = token.startswith('▁') or (i == 0)
-                word_boundaries.append(is_word_start)
-        
+                token_text = text[start_offset:end_offset]
+                lang = self.lang_detector.detect_token_language(token_text, text, i, pair, sentence_pattern)
+                is_word_start = token.startswith('?') or (i == 0)
+
+            language_ids.append(lang)
+            word_boundaries.append(is_word_start)
+
         return {
             'text': text,
             'tokens': tokens,
@@ -474,7 +511,7 @@ class SwitchLinguaProcessor:
             'first_language': sentence_meta['first_language'],
             'second_language': sentence_meta['second_language']
         }
-    
+
     def generate_predictive_labels(self, tokenized_data: Dict) -> Dict:
         """
         Generate labels for streaming prediction task.
@@ -662,25 +699,37 @@ class SwitchLinguaProcessor:
         return processed_samples
     
     def create_splits(self, all_samples: List[Dict]) -> Dict[str, List[Dict]]:
-        """Split data into train/val/test"""
-        np.random.seed(self.config.random_seed)
-        
-        # Shuffle
-        indices = np.random.permutation(len(all_samples))
-        
-        # Calculate split points
-        n_train = int(len(all_samples) * self.config.train_split)
-        n_val = int(len(all_samples) * self.config.val_split)
-        
-        train_idx = indices[:n_train]
-        val_idx = indices[n_train:n_train + n_val]
-        test_idx = indices[n_train + n_val:]
-        
-        splits = {
-            'train': [all_samples[i] for i in train_idx],
-            'val': [all_samples[i] for i in val_idx],
-            'test': [all_samples[i] for i in test_idx]
-        }
+        """Split data into train/val/test with group-aware, pair-stratified sampling."""
+        rng = np.random.default_rng(self.config.random_seed)
+        grouped_samples = defaultdict(list)
+
+        for sample in all_samples:
+            group_key = (sample['pair'], sample.get('original_idx', sample.get('sentence_idx', -1)))
+            grouped_samples[group_key].append(sample)
+
+        grouped_keys_by_pair = defaultdict(list)
+        for group_key in grouped_samples:
+            grouped_keys_by_pair[group_key[0]].append(group_key)
+
+        splits = {'train': [], 'val': [], 'test': []}
+
+        for pair, group_keys in grouped_keys_by_pair.items():
+            shuffled_keys = list(group_keys)
+            rng.shuffle(shuffled_keys)
+
+            total_groups = len(shuffled_keys)
+            n_train = int(total_groups * self.config.train_split)
+            n_val = int(total_groups * self.config.val_split)
+
+            split_keys = {
+                'train': shuffled_keys[:n_train],
+                'val': shuffled_keys[n_train:n_train + n_val],
+                'test': shuffled_keys[n_train + n_val:],
+            }
+
+            for split_name, keys in split_keys.items():
+                for key in keys:
+                    splits[split_name].extend(grouped_samples[key])
         
         print(f"\n📊 Data splits:")
         for split_name, split_data in splits.items():
@@ -708,7 +757,15 @@ class SwitchLinguaProcessor:
             'model_name': self.config.model_name,
             'language_pairs': self.config.language_pairs,
             'duration_bins': self.config.duration_bins,
-            'max_length': self.config.max_length
+            'max_length': self.config.max_length,
+            'pad_token_id': self.tokenizer.pad_token_id,
+            'padding_side': self.tokenizer.padding_side,
+            'spanish_lid_backend': self.config.spanish_lid_backend,
+            'processor_config': {
+                **asdict(self.config),
+                'output_dir': str(self.config.output_dir),
+                'cache_dir': str(self.config.cache_dir),
+            }
         }
         with open(config_path, 'w') as f:
             json.dump(config_dict, f, indent=2)
@@ -912,7 +969,8 @@ class StreamingCodeSwitchDataset(Dataset):
         self,
         data_path: Union[str, Path],
         max_context_window: int = 128,
-        return_causal_mask: bool = True
+        return_causal_mask: bool = True,
+        pad_token_id: int = 1
     ):
         """
         Args:
@@ -925,6 +983,7 @@ class StreamingCodeSwitchDataset(Dataset):
         
         self.max_context_window = max_context_window
         self.return_causal_mask = return_causal_mask
+        self.pad_token_id = pad_token_id
         
         # Flatten samples into individual prediction points
         self.prediction_points = []
@@ -961,11 +1020,11 @@ class StreamingCodeSwitchDataset(Dataset):
         
         # Pad if necessary
         if len(context_ids) < self.max_context_window:
-            padding = [0] * (self.max_context_window - len(context_ids))
+            padding = [self.pad_token_id] * (self.max_context_window - len(context_ids))
             context_ids = padding + context_ids
         
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = [1 if tid != 0 else 0 for tid in context_ids]
+        attention_mask = [1 if tid != self.pad_token_id else 0 for tid in context_ids]
         
         return {
             'input_ids': torch.tensor(context_ids, dtype=torch.long),
@@ -1008,6 +1067,13 @@ def main():
         default=512,
         help="Tokenizer max length metadata to store in config",
     )
+    parser.add_argument(
+        "--spanish_lid_backend",
+        type=str,
+        default="codeswitch",
+        choices=["papluca", "codeswitch"],
+        help="Backend used for Spanish-English word-level language identification",
+    )
 
     args = parser.parse_args()
 
@@ -1017,6 +1083,7 @@ def main():
         output_dir=Path(args.output_dir),
         cache_dir=Path(args.cache_dir),
         max_length=args.max_length,
+        spanish_lid_backend=args.spanish_lid_backend,
     )
     
     # Create processor

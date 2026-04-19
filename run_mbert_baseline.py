@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument(
         "--python",
         type=str,
-        default=str(Path(".venv") / "Scripts" / "python.exe"),
+        default=sys.executable,
         help="Python executable to use.",
     )
     parser.add_argument(

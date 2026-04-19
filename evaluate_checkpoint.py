@@ -15,6 +15,13 @@ def make_checkpoint_compatible() -> None:
     __main__.ModelConfig = model.ModelConfig
 
 
+def load_model_config(payload):
+    """Support both legacy pickled config objects and dict-based configs."""
+    if isinstance(payload, dict):
+        return model.ModelConfig.from_dict(payload)
+    return payload
+
+
 def collate_fn(batch):
     result = {
         "input_ids": torch.stack([item["input_ids"] for item in batch]),
@@ -45,8 +52,10 @@ def evaluate_model(net, loader, device, threshold, num_duration_classes):
                 apply_causal_mask=True,
             )
 
-            switch_logits = outputs["switch_logits"][:, -1, :].unsqueeze(1)
-            duration_logits = outputs["duration_logits"][:, -1, :].unsqueeze(1)
+            last_positions = model.last_active_index(attention_mask)
+            batch_indices = torch.arange(input_ids.size(0), device=device)
+            switch_logits = outputs["switch_logits"][batch_indices, last_positions, :].unsqueeze(1)
+            duration_logits = outputs["duration_logits"][batch_indices, last_positions, :].unsqueeze(1)
             switch_labels = switch_labels.unsqueeze(1)
             duration_labels = duration_labels.unsqueeze(1)
 
@@ -133,7 +142,7 @@ def main():
     device = torch.device(device)
 
     checkpoint = torch.load(args.model_path, map_location="cpu", weights_only=False)
-    config = checkpoint["config"]
+    config = load_model_config(checkpoint["config"])
 
     net = model.CausalCodeSwitchModel(config)
     net.load_state_dict(checkpoint["model_state_dict"])
@@ -143,6 +152,7 @@ def main():
         pathlib.Path(args.data_path),
         max_context_window=config.max_context_window,
         max_samples=args.max_samples,
+        pad_token_id=config.pad_token_id,
     )
     loader = DataLoader(
         dataset,
