@@ -75,6 +75,8 @@ class ModelConfig:
     duration_hidden_dim: int = 256
     num_duration_classes: int = 3  # Small, Medium, Large
     dropout_rate: float = 0.1
+    use_adapter: bool = True
+    adapter_dim: int = 128
     
     # Causal attention
     max_context_window: int = 128
@@ -273,6 +275,36 @@ class DurationPredictionHead(nn.Module):
         return self.classifier(hidden_states)
 
 
+class BottleneckAdapter(nn.Module):
+    """Residual bottleneck adapter inserted between the encoder and task heads."""
+
+    def __init__(self, hidden_size: int, adapter_dim: int, dropout: float):
+        super().__init__()
+
+        self.down_project = nn.Linear(hidden_size, adapter_dim)
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+        self.up_project = nn.Linear(adapter_dim, hidden_size)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.down_project.weight)
+        nn.init.zeros_(self.down_project.bias)
+        nn.init.xavier_uniform_(self.up_project.weight)
+        nn.init.zeros_(self.up_project.bias)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.down_project(hidden_states)
+        hidden_states = self.activation(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.up_project(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        return self.layer_norm(residual + hidden_states)
+
+
 # ============================================================================
 # Main Model: CausalCodeSwitchModel
 # ============================================================================
@@ -323,7 +355,15 @@ class CausalCodeSwitchModel(nn.Module):
         
         # Layer normalization before heads (helps training stability)
         self.layer_norm = nn.LayerNorm(config.hidden_size)
-        
+        self.adapter = (
+            BottleneckAdapter(
+                hidden_size=config.hidden_size,
+                adapter_dim=config.adapter_dim,
+                dropout=config.dropout_rate
+            )
+            if config.use_adapter else nn.Identity()
+        )
+
         logger.info(f"Model initialized with {self._count_parameters():,} parameters")
     
     def _freeze_encoder_layers(self, num_layers: int):
@@ -392,7 +432,8 @@ class CausalCodeSwitchModel(nn.Module):
         
         # Apply layer norm
         hidden_states = self.layer_norm(hidden_states)
-        
+        hidden_states = self.adapter(hidden_states)
+
         # Predict with both heads
         switch_logits = self.switch_head(hidden_states)
         duration_logits = self.duration_head(hidden_states)
